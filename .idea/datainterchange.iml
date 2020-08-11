@@ -8,7 +8,7 @@
     <content url="file://$MODULE_DIR$/../sarracenia/sarra">
       <excludeFolder url="file://$MODULE_DIR$/../sarracenia/sarra" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.8 (dataexchange)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.8 (datainterchange)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

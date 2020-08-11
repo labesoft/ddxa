@@ -1,16 +1,15 @@
-import glob
-import json
 import logging
 import os
 import random
 import sys
 import threading
 import time
-import urllib.parse
-import urllib.request
+from os.path import relpath
 from pathlib import Path
+from queue import Queue
 
-from amqp import Connection, Message
+import amqp
+from amqp import Message
 
 DEFAULT_SLEEP_TIME = 1.0
 
@@ -26,200 +25,119 @@ r2 = random.randint(0, 100000000)
 module_logger.info(f'r1={r1}, r2={r2}')
 
 
-class Client:
-    """ Client is a base class for receiving msg from queues
-    """
-    def __init__(self, thread_id, host='localhost:5672', userid='anonymous', password='anonymous'):
-        """ Create a worker that consume from a queue
-        This include the initialisation of an amqp connection and a channel
-        """
-        self.thread_id = thread_id
-        self.ctag = f'ctag-{r1}-{r2}-th{self.thread_id}'
-        self.logger = logging.getLogger(module_name).getChild(f'{self.__class__.__name__}_{thread_id}')
-        self.connection = Connection(host=host, userid=userid, password=password)
-        self.connection.connect()
-        self.channel = self.connection.channel()
+def sub(queue):
+    with amqp.Connection(host=host, userid=user, password=pwd) as c:
+        ch = c.channel()
+        ch.queue_declare(queue=queue, passive=False, durable=False, exclusive=False, auto_delete=False,
+                         arguments={'expire': 300000, 'message_ttl': 300000})
+        ch.queue_bind(queue=queue, exchange='xpublic', routing_key='#')
+        ch.basic_qos(0, 0, False)
 
-    def queue_init(self, qname, f_callback, topic='#'):
-        """ Construct a queue or use it on the current channel
-        If the queue already exists it does nothing except if opening without the same parameters
-        :param qname: the name of the amqp queue
-        :param f_callback: function to callback in consume
-        :return: None
-        """
-        self.qname = qname
-        self.channel.queue_declare(queue=qname, passive=False, durable=False, exclusive=False, auto_delete=True,
-                                arguments={'expire': 300000, 'message_ttl': 300000})
-        self.channel.queue_bind(queue=qname, exchange='xpublic', routing_key=topic)
-        self.channel.basic_qos(0, 1, False)
-
-    def on_message_sub(self, msg):
-        """Callback method that is call by consumer when a msg is received
-        :param msg: the msg received
-        """
-        self.logger.info(f"Received msg: topic={msg.delivery_info['routing_key']}, filename={msg.headers['filename']}, msg.body={msg.body}")
-        self.logger.debug(f"msg.headers={msg.headers}, msg.body={msg.body}")
-        self.channel.basic_ack(delivery_tag=msg.delivery_tag)
-
-    def on_message_pub(self, msg, routing_key):
-        """Callback method that is call by consumer when a msg is received
-        :param msg: the msg received
-        """
-        self.logger.info(f"Published: topic={routing_key}, filename={msg.headers['filename']}, msg.body={msg.body}")
-
-    def on_message_get(self, msg):
-        """Callback method that is call by consumer when a msg is received
-        :param msg: the msg received
-        """
-        host, absolute_filepath = tuple(msg.body.split(' ')[1:])
-        relative_filepath = absolute_filepath.lstrip('/')
-        url = urllib.parse.urljoin(host, relative_filepath)
-        if not os.path.exists(os.path.dirname(relative_filepath)):
-            os.makedirs(os.path.dirname(relative_filepath))
-        try:
-            urllib.request.urlretrieve(url, relative_filepath)
-        except Exception as err:
-            msg_dump = {'properties': msg.properties, 'body': msg.body, 'delivery_info': msg.delivery_info}
-            msg_dump = json.dumps(msg_dump, indent=1)
-            self.logger.error(f'err={err}, msg={msg}')
-            self.logger.debug(f'msg_dump={msg_dump}')
-        self.logger.info(f'Downloaded {os.path.join(os.path.dirname(__file__), relative_filepath)}')
-        self.channel.basic_ack(delivery_tag=msg.delivery_tag)
-
-    def get_msg_loop(self, is_alive=True):
-        """ Start the worker job if possible
-        :param is_alive: condition that enable the run of the worker
-        :return: None
-        """
-        while is_alive:
-            try:
-                self.channel.basic_get()
-            except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError) as run_err:
-                self.logger.info('Connection lost, aborting worker %d: %s' % (os.getpid(), run_err))
-                is_alive = False
-                raise
-            time.sleep(DEFAULT_SLEEP_TIME)
-
-    def on_cancel(self):
-        self.logger.info('cancelled')
-
-    def consume_msg_loop(self, is_alive=True):
-        """ Start the worker job if possible
-        :param is_alive: condition that enable the run of the worker
-        :return: None
-        """
-        first_run = True
-
-        while is_alive:
-            try:
-                self.channel.basic_cancel(self.ctag)
-                self.ctag = self.channel.basic_consume(queue=self.qname, callback=self.on_message_sub, on_cancel=self.on_cancel)
-            except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError) as run_err:
-                self.logger.info('Connection lost, aborting worker %d: %s' % (os.getpid(), run_err))
-                is_alive = False
-                raise
-            time.sleep(DEFAULT_SLEEP_TIME)
-
-    def pub_msg_loop(self, is_alive=True, files=None):
-        """ Start the worker job if possible
-        :param is_alive: condition that enable the run of the worker
-        :return: None
-        """
-        count = 0
-        for f in files:
-            relpath = f.lstrip(str(Path.home()))
-            routing_key = relpath.replace('/', '.').strip('\\.')
-            with open(f, 'rb') as rf:
-                body = rf.read()
-            self.logger.debug(f'body={body}')
-            header = {'filename': os.path.basename(relpath)}
-            msg = Message(body, application_headers=header)
-            try:
-                self.channel.basic_publish(msg=msg, exchange='xpublic', routing_key=routing_key)
-                self.on_message_pub(msg, routing_key)
-            except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError) as run_err:
-                self.logger.info('Connection lost, aborting worker %d: %s' % (os.getpid(), run_err))
-                is_alive = False
-                raise
-            time.sleep(DEFAULT_SLEEP_TIME)
-            count += 1
-
-    def close(self):
-        """ Directly close the connection
-        :return: None
-        """
-        self.logger.info('Closing connection')
-        self.connection.close()
+        def on_message(message):
+            print('Received message (delivery tag: {}): {}'.format(message.delivery_tag, message.body))
+            ch.basic_ack(message.delivery_tag)
+        ch.basic_consume(queue=queue, callback=on_message)
+        while True:
+            c.drain_events()
 
 
-def sub(thread_id=1, files=None, topic='#'):
-    # host = 'hpfx.collab.science.gc.ca:5672'
-    # host = 'dd.weather.gc.ca:5672'
-    host = 'localhost:5672'
-    # topic = '*.*.20200728.WXO-DD.#'
-    qname = f'q_rabbit_testing_{r1}_{r2}'
-    # qname = f'q_anonymous_sr_subscribe.dxpoc.{r1}.{r2}'
-    client = Client(thread_id, host, userid="tfeed", password="ZTI0MjFmZGM0YzM3YmQwOWJlNjhlNjMz")
-    client.queue_init(qname, client.on_message_sub, topic)
-    module_logger.info(' [*] Waiting for messages. To exit press CTRL+C')
+def get(id, queue, basedir, host, user, pwd, qname, topic):
+    logger = logging.getLogger(module_name).getChild(f'get_{id}')
+    logger.setLevel(logging.ERROR)
     try:
-        client.consume_msg_loop()
-    except Exception as err:
-        module_logger.error(f'err={err}', exc_info=True)
-    finally:
-        client.close()
+        with amqp.Connection(host=host, userid=user, password=pwd) as c:
+            ch = c.channel()
+            ch.queue_declare(queue=qname, passive=False, durable=False, exclusive=False, auto_delete=True,
+                             arguments={'expire': 300000, 'message_ttl': 300000})
+            ch.queue_bind(queue=qname, exchange='xpublic', routing_key=topic)
+            ch.basic_qos(0, 0, False)
+
+            def on_message(msg):
+                dir_path = Path(basedir, 'out', msg.headers['rel_path'])
+                dir_path.mkdir(parents=True, exist_ok=True)
+                file_path = dir_path.joinpath(msg.headers['filename'])
+                try:
+                    if msg.body:
+                        with file_path.open('wb') as f:
+                            f.write(msg.body)
+                    else:
+                        file_path.touch(exist_ok=True)
+                    logger.info(f"Downloaded: file_path={file_path}")
+                except (TypeError, ConnectionResetError, FileNotFoundError) as err:
+                    logger.error(f"err={err}, msg.headers={msg.headers} msg.body={msg.body}")
+                ch.basic_ack(delivery_tag=msg.delivery_tag)
+            ch.basic_consume(queue=qname, callback=on_message)
+            while True:
+                c.drain_events()
+    except ConnectionResetError as err:
+        logger.error(f'err={err}')
+        get(id, queue, basedir, host, user, pwd, qname, topic)
 
 
-def pub(thread_id=1, files=None):
-    # host = 'hpfx.collab.science.gc.ca:5672'
-    # host = 'dd.weather.gc.ca:5672'
-    host = 'localhost:5672'
-    client = Client(thread_id, host, userid="tfeed", password="ZTI0MjFmZGM0YzM3YmQwOWJlNjhlNjMz")
-    # client.queue_init(f'q_anonymous_sr_subscribe.dxpoc.{r1}.{r2}', client.on_message_pub)
-    module_logger.info(' [*] Waiting for messages. To exit press CTRL+C')
-    module_logger.info(len(files))
-    try:
-        # TODO make msg get optionnal when msg is created here (like sr_watch)
-        client.pub_msg_loop(True, files)
-    except Exception as err:
-        module_logger.error(f'err={err}', exc_info=True)
-    finally:
-        client.close()
+def pub(id, queue, base_dir, host, user, pwd, qname, topic):
+    logger = logging.getLogger(module_name).getChild(f'pub_{id}')
+    logger.setLevel(logging.INFO)
+    with amqp.Connection(host=host, userid=user, password=pwd) as c:
+        channel = c.channel()
 
+        while True:
+            if not queue.empty():
+                item = queue.get()
+                logger.debug(f'item={item}')
+                dir_path, files = item
+                rel_path = relpath(dir_path, base_dir)
+                topic = '.'.join(Path(rel_path).parts)
+                for f in files:
+                    file_path = Path(dir_path, f)
+                    if file_path.exists() and relpath(dir_path, Path(Path.cwd(), 'out')) != rel_path and file_path.stat().st_size < 1024:
+                        try:
+                            with file_path.open('rb') as rf:
+                                body = rf.read()
+                        except (PermissionError, OSError) as err:
+                            logger.error(f'err={err}, file_path={file_path}')
+                            continue
 
-def get(thread_id=1):
-    # host = 'hpfx.collab.science.gc.ca:5672'
-    # host = 'dd.weather.gc.ca:5672'
-    host = 'localhost:5672'
-    # qname = f'q_anonymous_sr_subscribe.dxpoc.{r1}.{r2}'
-    qname = f'q_rabbit_testing'
-    client = Client(thread_id, host, userid="tfeed", password="ZTI0MjFmZGM0YzM3YmQwOWJlNjhlNjMz")
-    client.queue_init(qname, client.on_message_get)
-    module_logger.info(' [*] Waiting for messages. To exit press CTRL+C')
-    try:
-        client.get_msg_loop()
-    except Exception as err:
-        module_logger.error(f'err={err}', exc_info=True)
-    finally:
-        client.close()
+                        routing_key = '.'.join([topic, f]).strip(r'.')
+                        header = {'basedir': str(base_dir), 'rel_path': rel_path, 'filename': f}
+                        msg = Message(body, application_headers=header)
+                        try:
+                            # Publish
+                            channel.basic_publish(msg=msg, exchange='xpublic', routing_key=routing_key)
+                            logger.info(f"Published: msg.headers={msg.headers}, msg.body={msg.body[:100]}, "
+                                        f"topic={routing_key}")
+                        except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError) as run_err:
+                            logger.error('Connection lost, aborting worker %d: %s' % (os.getpid(), run_err))
+            else:
+                logger.info('queue is empty')
+                time.sleep(10)
 
 
 if __name__ == "__main__":
+    # Parse args
     target = locals()[sys.argv[1]]
-    nb_th = int(sys.argv[2])
+    nb_thread = int(sys.argv[2])
     topic = sys.argv[3]
-    files = []
-    if target == pub:
-        files = glob.glob(os.path.join(str(Path.home()), '**'), recursive=True)
-    files = [f for f in files if os.path.isfile(f)]
-    module_logger.info(f'file number: {len(files)}, dir={os.getcwd()}')
-    th_size = int(len(files) / nb_th) + 1
-    thrds = [threading.Thread(target=target, args=(i, files[int(i*th_size):int((i+1)*th_size)], topic)) for i in range(nb_th)]
+    basedir = Path(sys.argv[4])
+    module_logger.info(f'target={sys.argv[1]}, nb_thread={nb_thread}, topic={topic}, basedir={basedir}')
 
-    [t.start() for t in thrds]
+    # Default args
+    user = "tfeed"
+    pwd = "ZTI0MjFmZGM0YzM3YmQwOWJlNjhlNjMz"
+    host = '192.168.1.69:5672'
+    qname = f'q_rabbit_testing_{r1}_{r2}'
 
+    # Threading management
+    files_q = Queue()
+    thrds = [threading.Thread(target=target, args=(i, files_q, basedir, host, user, pwd, qname, topic)) for i in range(nb_thread)]
     try:
+        [t.start() for t in thrds]
+        if target == pub:
+            for dirpath, dir_node, file_node in os.walk(basedir):
+                if file_node:
+                    files_q.put((dirpath, file_node))
         while True:
             time.sleep(0.1)
+    except Exception as err:
+        module_logger.error(f'err={err}', exc_info=True)
     except KeyboardInterrupt:
         [t.join() for t in thrds]
