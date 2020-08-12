@@ -4,6 +4,7 @@ import random
 import sys
 import threading
 import time
+from concurrent.futures.thread import ThreadPoolExecutor
 from os.path import relpath
 from pathlib import Path
 from queue import Queue
@@ -41,11 +42,12 @@ def sub(queue):
             c.drain_events()
 
 
-def get(id, queue, basedir, host, user, pwd, qname, topic):
+def get(id, qname, basedir, host, user, pwd, topic):
     logger = logging.getLogger(module_name).getChild(f'get_{id}')
     logger.setLevel(logging.ERROR)
     try:
         with amqp.Connection(host=host, userid=user, password=pwd) as c:
+
             ch = c.channel()
             ch.queue_declare(queue=qname, passive=False, durable=False, exclusive=False, auto_delete=True,
                              arguments={'expire': 300000, 'message_ttl': 300000})
@@ -71,18 +73,22 @@ def get(id, queue, basedir, host, user, pwd, qname, topic):
                 c.drain_events()
     except ConnectionResetError as err:
         logger.error(f'err={err}')
-        get(id, queue, basedir, host, user, pwd, qname, topic)
+        get(id, qname, basedir, host, user, pwd, topic)
 
 
-def pub(id, queue, base_dir, host, user, pwd, qname, topic):
+def pub(id, queue, base_dir, host, user, pwd, topic):
     logger = logging.getLogger(module_name).getChild(f'pub_{id}')
     logger.setLevel(logging.INFO)
     with amqp.Connection(host=host, userid=user, password=pwd) as c:
         channel = c.channel()
 
-        while True:
+        is_alive = True
+        was_empty = False
+        while is_alive:
             if not queue.empty():
+                was_empty = False
                 item = queue.get()
+                if item[0].startswith(str(Path.cwd().joinpath('out'))): continue
                 logger.debug(f'item={item}')
                 dir_path, files = item
                 rel_path = relpath(dir_path, base_dir)
@@ -107,9 +113,17 @@ def pub(id, queue, base_dir, host, user, pwd, qname, topic):
                                         f"topic={routing_key}")
                         except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError) as run_err:
                             logger.error('Connection lost, aborting worker %d: %s' % (os.getpid(), run_err))
-            else:
+            elif not was_empty:
                 logger.info('queue is empty')
                 time.sleep(10)
+                was_empty = True
+            else:
+                is_alive = False
+
+def fill_files_queue(basedir, files_q):
+    for dirpath, dir_node, file_node in os.walk(basedir):
+        if file_node:
+            files_q.put((dirpath, file_node))
 
 
 if __name__ == "__main__":
@@ -124,20 +138,15 @@ if __name__ == "__main__":
     user = "tfeed"
     pwd = "ZTI0MjFmZGM0YzM3YmQwOWJlNjhlNjMz"
     host = '192.168.1.69:5672'
-    qname = f'q_rabbit_testing_{r1}_{r2}'
 
     # Threading management
-    files_q = Queue()
-    thrds = [threading.Thread(target=target, args=(i, files_q, basedir, host, user, pwd, qname, topic)) for i in range(nb_thread)]
-    try:
-        [t.start() for t in thrds]
+    with ThreadPoolExecutor(max_workers=nb_thread+1) as ilyn_payne:
         if target == pub:
-            for dirpath, dir_node, file_node in os.walk(basedir):
-                if file_node:
-                    files_q.put((dirpath, file_node))
-        while True:
-            time.sleep(0.1)
-    except Exception as err:
-        module_logger.error(f'err={err}', exc_info=True)
-    except KeyboardInterrupt:
-        [t.join() for t in thrds]
+            q = Queue()
+            ilyn_payne.submit(fill_files_queue, basedir, q)
+        else:
+            q = f'q_rabbit_testing_{r1}_{r2}'
+
+        for i in range(nb_thread):
+            ilyn_payne.submit(target, i, q, basedir, host, user, pwd, topic)
+
