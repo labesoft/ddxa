@@ -1,9 +1,9 @@
+import concurrent
 import logging
 import os
 import random
 import sys
-import threading
-import time
+
 from concurrent.futures.thread import ThreadPoolExecutor
 from os.path import relpath
 from pathlib import Path
@@ -26,54 +26,33 @@ r2 = random.randint(0, 100000000)
 module_logger.info(f'r1={r1}, r2={r2}')
 
 
-def sub(queue):
-    with amqp.Connection(host=host, userid=user, password=pwd) as c:
-        ch = c.channel()
-        ch.queue_declare(queue=queue, passive=False, durable=False, exclusive=False, auto_delete=False,
-                         arguments={'expire': 300000, 'message_ttl': 300000})
-        ch.queue_bind(queue=queue, exchange='xpublic', routing_key='#')
-        ch.basic_qos(0, 0, False)
-
-        def on_message(message):
-            print('Received message (delivery tag: {}): {}'.format(message.delivery_tag, message.body))
-            ch.basic_ack(message.delivery_tag)
-        ch.basic_consume(queue=queue, callback=on_message)
-        while True:
-            c.drain_events()
-
-
-def get(id, qname, basedir, host, user, pwd, topic):
+def get(id, c, qname, basedir, host, user, pwd, topic):
     logger = logging.getLogger(module_name).getChild(f'get_{id}')
-    logger.setLevel(logging.ERROR)
-    try:
-        with amqp.Connection(host=host, userid=user, password=pwd) as c:
+    logger.setLevel(logging.INFO)
 
-            ch = c.channel()
-            ch.queue_declare(queue=qname, passive=False, durable=False, exclusive=False, auto_delete=True,
-                             arguments={'expire': 300000, 'message_ttl': 300000})
-            ch.queue_bind(queue=qname, exchange='xpublic', routing_key=topic)
-            ch.basic_qos(0, 0, False)
+    ch = c.channel()
+    ch.queue_declare(queue=qname, passive=False, durable=False, exclusive=False, auto_delete=True,
+                     arguments={'expire': 300000, 'message_ttl': 300000})
+    ch.queue_bind(queue=qname, exchange='xpublic', routing_key=topic)
+    ch.basic_qos(0, 0, False)
 
-            def on_message(msg):
-                dir_path = Path(basedir, 'out', msg.headers['rel_path'])
-                dir_path.mkdir(parents=True, exist_ok=True)
-                file_path = dir_path.joinpath(msg.headers['filename'])
-                try:
-                    if msg.body:
-                        with file_path.open('wb') as f:
-                            f.write(msg.body)
-                    else:
-                        file_path.touch(exist_ok=True)
-                    logger.info(f"Downloaded: file_path={file_path}")
-                except (TypeError, ConnectionResetError, FileNotFoundError) as err:
-                    logger.error(f"err={err}, msg.headers={msg.headers} msg.body={msg.body}")
-                ch.basic_ack(delivery_tag=msg.delivery_tag)
-            ch.basic_consume(queue=qname, callback=on_message)
-            while True:
-                c.drain_events()
-    except ConnectionResetError as err:
-        logger.error(f'err={err}')
-        get(id, qname, basedir, host, user, pwd, topic)
+    def on_message(msg):
+        dir_path = Path(basedir, 'out', msg.headers['rel_path'])
+        dir_path.mkdir(parents=True, exist_ok=True)
+        file_path = dir_path.joinpath(msg.headers['filename'])
+        try:
+            if msg.body:
+                with file_path.open('wb') as f:
+                    f.write(msg.body)
+            else:
+                file_path.touch(exist_ok=True)
+            logger.info(f"Downloaded: file_path={file_path}")
+        except (TypeError, ConnectionResetError, FileNotFoundError) as err:
+            logger.error(f"err={err}, msg.headers={msg.headers} msg.body={msg.body}")
+        ch.basic_ack(delivery_tag=msg.delivery_tag)
+    ch.basic_consume(queue=qname, callback=on_message)
+    while True:
+        c.drain_events()
 
 
 def pub(id, queue, base_dir, host, user, pwd, topic):
@@ -82,47 +61,42 @@ def pub(id, queue, base_dir, host, user, pwd, topic):
     with amqp.Connection(host=host, userid=user, password=pwd) as c:
         channel = c.channel()
 
-        is_alive = True
-        was_empty = False
-        while is_alive:
-            if not queue.empty():
-                was_empty = False
-                item = queue.get()
-                if item[0].startswith(str(Path.cwd().joinpath('out'))): continue
-                logger.debug(f'item={item}')
-                dir_path, files = item
-                rel_path = relpath(dir_path, base_dir)
-                topic = '.'.join(Path(rel_path).parts)
-                for f in files:
-                    file_path = Path(dir_path, f)
-                    if file_path.exists() and relpath(dir_path, Path(Path.cwd(), 'out')) != rel_path and file_path.stat().st_size < 1024:
-                        try:
-                            with file_path.open('rb') as rf:
-                                body = rf.read()
-                        except (PermissionError, OSError) as err:
-                            logger.error(f'err={err}, file_path={file_path}')
-                            continue
+        while not queue.empty():
+            item = queue.get()
+            if item[0].startswith(str(Path.cwd().joinpath('out'))): continue
+            logger.debug(f'item={item}')
+            dir_path, files = item
+            rel_path = relpath(dir_path, base_dir)
+            topic = '.'.join(Path(rel_path).parts)
+            for f in files:
+                file_path = Path(dir_path, f)
+                if (file_path.exists() and relpath(dir_path, Path(Path.cwd(), 'out')) != rel_path
+                        and 0 < file_path.stat().st_size < pow(2, 20)):
+                    try:
+                        with file_path.open('rb') as rf:
+                            body = rf.read()
+                    except (PermissionError, OSError) as err:
+                        logger.error(f'err={err}, file_path={file_path}')
+                        continue
 
-                        routing_key = '.'.join([topic, f]).strip(r'.')
-                        header = {'basedir': str(base_dir), 'rel_path': rel_path, 'filename': f}
-                        msg = Message(body, application_headers=header)
-                        try:
-                            # Publish
-                            channel.basic_publish(msg=msg, exchange='xpublic', routing_key=routing_key)
-                            logger.info(f"Published: msg.headers={msg.headers}, msg.body={msg.body[:100]}, "
-                                        f"topic={routing_key}")
-                        except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError) as run_err:
-                            logger.error('Connection lost, aborting worker %d: %s' % (os.getpid(), run_err))
-            elif not was_empty:
-                logger.info('queue is empty')
-                time.sleep(10)
-                was_empty = True
-            else:
-                is_alive = False
+                    routing_key = '.'.join([topic, f]).strip(r'.')
+                    header = {'basedir': str(base_dir), 'rel_path': rel_path, 'filename': f}
+                    msg = Message(body, application_headers=header)
+                    try:
+                        # Publish
+                        channel.basic_publish(msg=msg, exchange='xpublic', routing_key=routing_key)
+                        logger.info(f"Published: msg.headers={msg.headers}, msg.body={msg.body[:100]}, "
+                                    f"topic={routing_key}")
+                    except (ConnectionRefusedError, ConnectionAbortedError, ConnectionResetError) as run_err:
+                        logger.error('Connection lost, aborting worker %d: %s' % (os.getpid(), run_err))
+
 
 def fill_files_queue(basedir, files_q):
+    logger = logging.getLogger(module_name).getChild(f'fill')
+    logger.setLevel(logging.INFO)
     for dirpath, dir_node, file_node in os.walk(basedir):
         if file_node:
+            logger.info(f'added {(dirpath, file_node)}')
             files_q.put((dirpath, file_node))
 
 
@@ -147,6 +121,12 @@ if __name__ == "__main__":
         else:
             q = f'q_rabbit_testing_{r1}_{r2}'
 
+        future_list = []
         for i in range(nb_thread):
-            ilyn_payne.submit(target, i, q, basedir, host, user, pwd, topic)
+            future_list.append(ilyn_payne.submit(target, i, q, basedir, host, user, pwd, topic))
+        for future in concurrent.futures.as_completed(future_list):
+            try:
+                future.result()
+            except Exception as err:
+                module_logger.error('Exception details:', exc_info=True)
 
