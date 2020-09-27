@@ -11,11 +11,11 @@ def get_module_name(f):
     return str(os.path.basename(f).split(r'.')[0])
 
 
-def create_logger():
+def create_logger(modname, ll):
     logformat = '%(asctime)s:%(msecs)f [%(levelname)s] %(message)s at %(name)s.%(funcName)s:%(lineno)s'
     logging.basicConfig(format=logformat)
-    logger = logging.getLogger(MODULE_NAME)
-    logger.setLevel(logging.INFO)
+    logger = logging.getLogger(modname)
+    logger.setLevel(ll)
     return logger
 
 
@@ -37,6 +37,14 @@ def keep_alive(conn: amqp.Connection):
             conn.heartbeat_tick()
 
 
+class DI:
+    def __init__(self, conn, base_dir, modname):
+        logger = module_logger.getChild(self.__class__.__name__)
+        logger.info(f'starting {self.__class__.__name__}({locals()})')
+        self.base_dir = base_dir
+        self.channel = conn.channel()
+
+
 CHUNK_SIZE = 1024
 MODULE_NAME = get_module_name(__file__)
-module_logger = create_logger()
+module_logger = create_logger(MODULE_NAME, logging.INFO)

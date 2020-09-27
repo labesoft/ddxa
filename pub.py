@@ -7,32 +7,30 @@ from pathlib import Path
 import amqp
 from amqp import Message
 
-from di import CHUNK_SIZE, get_module_name, create_logger
+from di import CHUNK_SIZE, get_module_name, create_logger, DI
 from q import FileQueue
 
 
 MODULE_NAME = get_module_name(__file__)
+module_logger = create_logger(MODULE_NAME, logging.INFO)
 
 
-class PUB:
-    def __init__(self, conn: amqp.Connection, queue: FileQueue, base_dir, t, ll):
-        self.logger = logging.getLogger(MODULE_NAME).getChild(self.__class__.__name__)
-        self.logger.setLevel(ll)
-        self.logger.info(f'starting PUB({locals()})')
+class PUB(DI):
+    def __init__(self, conn: amqp.Connection, queue: FileQueue, base_dir):
+        super(PUB, self).__init__(conn, base_dir, MODULE_NAME)
         self.queue = queue
-        self.base_dir = base_dir
-        self.chan = conn.channel()
         self.queue.put_files(self.base_dir)
 
     def run(self, sleep_count=0):
+        logger = module_logger.getChild(self.__class__.__name__)
         while not self.queue.empty():
             sleep_count = 0
             item = self.queue.get()
-            self.logger.info(f'qsize={self.queue.qsize()}')
+            logger.info(f'qsize={self.queue.qsize()}')
             if item[0].startswith(str(Path.cwd().joinpath('out'))):
                 # FIXME temp check to avoid republish of embedded dir
                 continue
-            self.logger.debug(f'item={item}')
+            logger.debug(f'item={item}')
             dir_path, files = item
             rel_path = relpath(dir_path, self.base_dir)
             topic = '.'.join(Path(rel_path).parts)
@@ -60,18 +58,16 @@ class PUB:
             'basedir': str(self.base_dir), 'rel_path': rel_path, 'filename': filename, 'offset': str(offset_count)
         }
         msg = Message(body, application_headers=header)
-        self.chan.basic_publish(msg=msg, exchange='xpublic', routing_key=routing_key)
-        self.logger.info(f"Published: msg.headers={msg.headers}, msg.body={msg.body[:100]}, topic={routing_key}")
+        self.channel.basic_publish(msg=msg, exchange='xpublic', routing_key=routing_key)
+        logger = module_logger.getChild(self.__class__.__name__)
+        logger.info(f"Published: msg.headers={msg.headers}, msg.body={msg.body[:100]}, topic={routing_key}")
 
     @classmethod
-    def get_queue(cls):  # FIXME random nb here doesn't make senses
+    def get_queue(cls):
         return FileQueue()
 
 
 if __name__ == "__main__":
-    # init logger
-    module_logger = create_logger()
-
     # Default args
     user = "tfeed"
     pwd = "ZTI0MjFmZGM0YzM3YmQwOWJlNjhlNjMz"
@@ -80,11 +76,11 @@ if __name__ == "__main__":
 
     # Parse args
     nb_thread = int(sys.argv[1])
-    topic_routing = sys.argv[2]
-    basedir = Path(sys.argv[3])
-    log_msg = f'target={sys.argv[1].upper()}, nb_thread={nb_thread}, topic_routing={topic_routing}, basedir={basedir}'
+    basedir = Path(sys.argv[2])
+    log_msg = f'PUB: nb_thread={nb_thread}, basedir={basedir}'
     module_logger.info(log_msg)
 
+    # Manage connection
     with amqp.Connection(host, user, pwd) as c:
         q = PUB.get_queue()
-        PUB(c, q, basedir, topic_routing, logging.INFO).run()
+        PUB(c, q, basedir).run()
