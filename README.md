@@ -1,1 +1,1 @@
-# ddxa
+# Distributed Data Exchange Application
