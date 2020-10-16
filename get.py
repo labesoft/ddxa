@@ -5,10 +5,10 @@ from pathlib import Path
 
 import amqp
 
-from di import keep_alive, CHUNK_SIZE, create_logger, get_module_name, DI
+from di import CHUNK_SIZE, create_logger, get_module_name, DI
 
 MODULE_NAME = get_module_name(__file__)
-module_logger = create_logger(MODULE_NAME, logging.INFO)
+module_logger = create_logger(MODULE_NAME, logging.ERROR)
 
 
 class GET(DI):
@@ -23,28 +23,26 @@ class GET(DI):
         self.channel.basic_qos(prefetch_size=0, prefetch_count=0, a_global=False)
 
     def run(self):
-        ctag = f'{self.qname}'
-        args = (self.qname, ctag)
-        kwargs = {'nowait': True, 'callback': self.on_message}
-        self.channel.basic_consume(*args, **kwargs)
-        keep_alive(self.conn)
+        def on_message(msg):
+            logger = module_logger.getChild(self.__class__.__name__)
+            dir_path = Path(self.base_dir, 'out', msg.headers['rel_path'])
+            dir_path.mkdir(parents=True, exist_ok=True)
+            file_path = dir_path.joinpath(msg.headers['filename'])
+            try:
+                if msg.body:
+                    with file_path.open('ab') as f:
+                        f.seek(int(msg.headers['offset']) * CHUNK_SIZE)
+                        f.write(msg.body)
+                else:
+                    file_path.touch(exist_ok=True)
+                logger.info(f"Downloaded: file_path={file_path}")
+            except (TypeError, ConnectionResetError, FileNotFoundError) as err:
+                logger.error(f"err={err}, msg.headers={msg.headers} msg.body={msg.body}")
+            self.channel.basic_ack(delivery_tag=msg.delivery_tag)
 
-    def on_message(self, msg):
         logger = module_logger.getChild(self.__class__.__name__)
-        dir_path = Path(self.base_dir, 'out', msg.headers['rel_path'])
-        dir_path.mkdir(parents=True, exist_ok=True)
-        file_path = dir_path.joinpath(msg.headers['filename'])
-        try:
-            if msg.body:
-                with file_path.open('ab') as f:
-                    f.seek(int(msg.headers['offset'])*CHUNK_SIZE)
-                    f.write(msg.body)
-            else:
-                file_path.touch(exist_ok=True)
-            logger.info(f"Downloaded: file_path={file_path}")
-        except (TypeError, ConnectionResetError, FileNotFoundError) as err:
-            logger.error(f"err={err}, msg.headers={msg.headers} msg.body={msg.body}")
-        self.channel.basic_ack(delivery_tag=msg.delivery_tag)
+        logger.info(f"start consuming qname={self.qname}, on_message={on_message}")
+        self.channel.basic_consume(queue=self.qname, callback=on_message)
 
     @classmethod
     def get_queue(cls):
@@ -71,4 +69,7 @@ if __name__ == "__main__":
     # Manage connection
     with amqp.Connection(host, user, pwd) as c:
         q = GET.get_queue()
-        GET(c, q, basedir, topic_routing).run()
+        g = GET(c, q, basedir, topic_routing)
+        for i in range(nb_thread):
+            g.run()
+        g.keep_alive()

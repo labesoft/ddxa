@@ -5,7 +5,7 @@ from queue import Queue
 from di import get_module_name, create_logger
 
 MODULE_NAME = get_module_name(__file__)
-module_logger = create_logger(MODULE_NAME, logging.INFO)
+module_logger = create_logger(MODULE_NAME, logging.ERROR)
 
 
 class FileQueue(Queue):

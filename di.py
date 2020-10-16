@@ -28,21 +28,21 @@ def on_error(*args, **kwargs):
     module_logger.error('Exception details:', exc_info=True)
 
 
-def keep_alive(conn: amqp.Connection):
-    while True:
-        try:
-            conn.drain_events(3600)
-        except socket.timeout as err:
-            module_logger.info(f'sending heartbeat to keep alive with err={err}')
-            conn.heartbeat_tick()
-
-
 class DI:
     def __init__(self, conn, base_dir, modname):
         logger = module_logger.getChild(self.__class__.__name__)
         logger.info(f'starting {self.__class__.__name__}({locals()})')
         self.base_dir = base_dir
+        self.conn = conn
         self.channel = conn.channel()
+
+    def keep_alive(self):
+        while True:
+            try:
+                self.conn.drain_events(3600)
+            except socket.timeout as err:
+                module_logger.info(f'sending heartbeat to keep alive with err={err}')
+                self.conn.heartbeat_tick()
 
 
 CHUNK_SIZE = 1024

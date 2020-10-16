@@ -1,61 +1,72 @@
+import concurrent
 import logging
 import sys
 import time
+from concurrent.futures.thread import ThreadPoolExecutor
+
 from os.path import relpath
 from pathlib import Path
 
 import amqp
 from amqp import Message
+from typing.io import BinaryIO
 
 from di import CHUNK_SIZE, get_module_name, create_logger, DI
 from q import FileQueue
 
 
 MODULE_NAME = get_module_name(__file__)
-module_logger = create_logger(MODULE_NAME, logging.INFO)
+module_logger = create_logger(MODULE_NAME, logging.ERROR)
 
 
 class PUB(DI):
     def __init__(self, conn: amqp.Connection, queue: FileQueue, base_dir):
         super(PUB, self).__init__(conn, base_dir, MODULE_NAME)
         self.queue = queue
-        self.queue.put_files(self.base_dir)
 
-    def run(self, sleep_count=0):
+    def run(self):
         logger = module_logger.getChild(self.__class__.__name__)
+        sleep_count = 0
+        while sleep_count < 10:
+            sleep_count = self.send_files_from_q(logger, sleep_count)
+
+    def send_files_from_q(self, logger, sleep_count):
         while not self.queue.empty():
             sleep_count = 0
-            item = self.queue.get()
+            dir_path, files = self.queue.get()
             logger.info(f'qsize={self.queue.qsize()}')
-            if item[0].startswith(str(Path.cwd().joinpath('out'))):
-                # FIXME temp check to avoid republish of embedded dir
-                continue
-            logger.debug(f'item={item}')
-            dir_path, files = item
-            rel_path = relpath(dir_path, self.base_dir)
-            topic = '.'.join(Path(rel_path).parts)
-            self.send_files(files, dir_path, rel_path, topic)
-        if sleep_count < 10:
-            time.sleep(1)
-            self.run(sleep_count + 1)
+            if not dir_path.startswith(str(Path.cwd().joinpath('out'))):
+                logger.debug(f'dir_path={dir_path}, files={files}')
+                rel_path = relpath(dir_path, self.base_dir)
+                topic = '.'.join(Path(rel_path).parts)
+                self.send_files(files, dir_path, rel_path, topic)
+        time.sleep(1)
+        return sleep_count + 1
 
     def send_files(self, filenames, dir_path, rel_path, topic):
         for filename in filenames:
-            self.send_file(dir_path, filename, rel_path, topic)
+            try:
+                self.send_file(filename, dir_path, rel_path, topic)
+            except FileNotFoundError as err:
+                logger = module_logger.getChild(self.__class__.__name__)
+                logger.error(f'File was removed: err={err}')
 
-    def send_file(self, dir_path, filename, rel_path, topic):
+    def send_file(self, filename, dir_path, rel_path, topic):
         file_path = Path(dir_path, filename)
         routing_key = '.'.join([topic, filename]).strip(r'.')
         with file_path.open('rb') as binary_file:
             self.send_filechunks(filename, binary_file, rel_path, routing_key)
 
-    def send_filechunks(self, filename, binary_file, rel_path, routing_key):
+    def send_filechunks(self, filename: str, binary_file: BinaryIO, rel_path: str, routing_key: str):
         for offset, body in enumerate(iter(lambda: binary_file.read(CHUNK_SIZE), b'')):
             self.publish_msg(body, filename, offset, rel_path, routing_key)
 
     def publish_msg(self, body, filename, offset_count, rel_path, routing_key):
         header = {
-            'basedir': str(self.base_dir), 'rel_path': rel_path, 'filename': filename, 'offset': str(offset_count)
+            'basedir': str(self.base_dir),
+            'rel_path': rel_path,
+            'filename': filename,
+            'offset': str(offset_count)
         }
         msg = Message(body, application_headers=header)
         self.channel.basic_publish(msg=msg, exchange='xpublic', routing_key=routing_key)
@@ -82,5 +93,13 @@ if __name__ == "__main__":
 
     # Manage connection
     with amqp.Connection(host, user, pwd) as c:
-        q = PUB.get_queue()
-        PUB(c, q, basedir).run()
+        with ThreadPoolExecutor(max_workers=nb_thread) as ilyn_payne:
+            futures = []
+            q = PUB.get_queue()
+            futures += [ilyn_payne.submit(q.put_files, basedir)]
+            futures += [ilyn_payne.submit(PUB(c, q, basedir).run) for i in range(nb_thread-1)]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    data = f.result()
+                except Exception as err:
+                    module_logger(f'f={f}, err={err}', exc_info=True)
