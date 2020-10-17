@@ -1,10 +1,7 @@
 import socket
 
-import amqp
 import logging
 import os
-
-from numba import jit, cuda
 
 
 def get_module_name(f):
@@ -28,7 +25,7 @@ def on_error(*args, **kwargs):
     module_logger.error('Exception details:', exc_info=True)
 
 
-class DI:
+class DDXA:
     def __init__(self, conn, base_dir, modname):
         logger = module_logger.getChild(self.__class__.__name__)
         logger.info(f'starting {self.__class__.__name__}({locals()})')

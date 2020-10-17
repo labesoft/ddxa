@@ -11,7 +11,7 @@ import amqp
 from amqp import Message
 from typing.io import BinaryIO
 
-from di import CHUNK_SIZE, get_module_name, create_logger, DI
+from ddxa import CHUNK_SIZE, get_module_name, create_logger, DDXA
 from q import FileQueue
 
 
@@ -19,7 +19,7 @@ MODULE_NAME = get_module_name(__file__)
 module_logger = create_logger(MODULE_NAME, logging.ERROR)
 
 
-class PUB(DI):
+class PUB(DDXA):
     def __init__(self, conn: amqp.Connection, queue: FileQueue, base_dir):
         super(PUB, self).__init__(conn, base_dir, MODULE_NAME)
         self.queue = queue

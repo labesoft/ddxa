@@ -5,13 +5,13 @@ from pathlib import Path
 
 import amqp
 
-from di import CHUNK_SIZE, create_logger, get_module_name, DI
+from ddxa import CHUNK_SIZE, create_logger, get_module_name, DDXA
 
 MODULE_NAME = get_module_name(__file__)
 module_logger = create_logger(MODULE_NAME, logging.ERROR)
 
 
-class GET(DI):
+class GET(DDXA):
     def __init__(self, conn: amqp.Connection, queue, base_dir, t):
         super().__init__(conn, base_dir, MODULE_NAME)
         self.qname = queue
