@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/datainterchange.iml" filepath="$PROJECT_DIR$/.idea/datainterchange.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/ddxa.iml" filepath="$PROJECT_DIR$/.idea/ddxa.iml" />
     </modules>
   </component>
 </project>
