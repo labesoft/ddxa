@@ -8,6 +8,6 @@ An application designed to seemlessly transfer any data needed to be transfered 
 - [ ] U2 - IoT modules providers want to collect data from their products sold throughout the world.
 - [ ] U3 - IT service providers want to collect data from their products sold throughout the world.
 - [ ] U4 - Social media platforms want their users to share information between them.
-- [X] U5 - Personnal home user want to share its data across its locally connected devices.
-- [X] U6 - Personnal home user want to share its data with its relatives and friends.
+- [X] U5 - Personnal home user want to share his data across his locally connected devices.
+- [X] U6 - Personnal home user want to share his data with his relatives and friends.
 - [ ] U7 - Application Developper want to share data between separate processes using a well defined library API.
