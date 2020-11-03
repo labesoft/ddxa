@@ -2,7 +2,7 @@
 
 An application designed to seemlessly transfer any data needed to be transfered with an easy configurable interface. Furthermore, this application is highly configurable, highly scalable and very efficient.
 
-## Usages
+## Application contexts
 
 - [ ] U1 - Scientists want to [share data](https://en.wikipedia.org/wiki/Data_sharing) between themselves throughout various network location in the world with different (and sometimes deprecated) protocols without a centralized data center to maintain and with the capability of being able to overcome political boundaries (ie USA vs Iran).
 - [ ] U2 - IoT modules providers want to collect data from their products sold throughout the world.
